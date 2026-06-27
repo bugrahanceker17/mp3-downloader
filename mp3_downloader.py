@@ -20,6 +20,7 @@ import time
 import queue
 import shutil
 import threading
+import webbrowser
 import urllib.request
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -39,6 +40,7 @@ except ImportError:                            # preview is optional
 
 APP_NAME = "MP3 / MP4 Downloader"
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".mp3_downloader.json")
+AUTHOR_URL = "https://github.com/bugrahanceker17"
 
 # ---------- Theme ----------
 BG = "#1e1e2e"
@@ -54,6 +56,65 @@ AUDIO_FORMATS = ["mp3", "m4a", "wav", "flac", "opus"]
 VIDEO_FORMATS = ["mp4", "mkv", "webm"]
 AUDIO_QUALITIES = ["320", "256", "192", "128", "96"]
 VIDEO_QUALITIES = ["Best", "2160", "1440", "1080", "720", "480", "360"]
+
+# ---------- Languages / translations ----------
+# display name -> language code
+LANGUAGES = {"English": "en", "Türkçe": "tr"}
+
+# key -> (english, turkish). Use self.t(key, **fmt) to resolve.
+I18N = {
+    "title":        ("🎵 MP3 / 🎬 MP4 Downloader", "🎵 MP3 / 🎬 MP4 İndirici"),
+    "subtitle":     ("Paste a link, pick a folder, download. No ads.",
+                     "Bağlantıyı yapıştır, klasör seç, indir. Reklamsız."),
+    "language":     ("Language", "Dil"),
+    "url_label":    ("Video / Playlist link", "Video / Oynatma listesi bağlantısı"),
+    "preview_ph":   ("🎬  Preview", "🎬  Önizleme"),
+    "preview_pil":  ("Preview needs Pillow (pip install pillow)",
+                     "Önizleme için Pillow gerekli (pip install pillow)"),
+    "preview_load": ("Loading preview…", "Önizleme yükleniyor…"),
+    "preview_none": ("No preview", "Önizleme yok"),
+    "folder_label": ("Save folder", "Kayıt klasörü"),
+    "browse":       ("Browse", "Gözat"),
+    "mode":         ("Mode", "Mod"),
+    "audio_mode":   ("🎵 Audio (MP3)", "🎵 Ses (MP3)"),
+    "video_mode":   ("🎬 Video (MP4)", "🎬 Video (MP4)"),
+    "quality_kbps": ("Quality (kbps)", "Kalite (kbps)"),
+    "resolution":   ("Resolution", "Çözünürlük"),
+    "format":       ("Format", "Format"),
+    "speed_limit":  ("Speed limit MB/s", "Hız sınırı MB/s"),
+    "adv_show":     ("▸ Advanced settings", "▸ Gelişmiş ayarlar"),
+    "adv_hide":     ("▾ Advanced settings", "▾ Gelişmiş ayarlar"),
+    "playlist":     ("Download playlist", "Oynatma listesini indir"),
+    "meta":         ("Embed cover + tags", "Kapak + etiket göm"),
+    "sponsor":      ("SponsorBlock (skip sponsors)", "SponsorBlock (sponsorları atla)"),
+    "subs":         ("Embed subtitles (video)", "Altyazı göm (video)"),
+    "lang_word":    ("lang", "dil"),
+    "frag":         ("Concurrent fragments", "Eşzamanlı parça"),
+    "cookies":      ("Browser cookies (for age/member restricted)",
+                     "Tarayıcı çerezleri (yaş/üyelik kısıtlı için)"),
+    "tmpl":         ("Filename template", "Dosya adı şablonu"),
+    "download":     ("⬇  Download", "⬇  İndir"),
+    "cancel":       ("Cancel", "İptal"),
+    "ready":        ("Ready.", "Hazır."),
+    "warn_link":    ("Please enter a link.", "Lütfen bir bağlantı girin."),
+    "warn_folder":  ("Please choose a save folder.", "Lütfen bir kayıt klasörü seçin."),
+    "ffmpeg_warn":  ("WARNING: ffmpeg not found. Conversion/merging won't work.",
+                     "UYARI: ffmpeg bulunamadı. Dönüştürme/birleştirme çalışmaz."),
+    "starting":     ("Starting [{mode}]: {url}", "Başlıyor [{mode}]: {url}"),
+    "cancelling":   ("Cancelling...", "İptal ediliyor..."),
+    "downloading":  ("⬇ Downloading: {label}", "⬇ İndiriliyor: {label}"),
+    "downloaded":   ("✓ Downloaded: {label}", "✓ İndirildi: {label}"),
+    "failed":       ("✗ Failed: {label}", "✗ Başarısız: {label}"),
+    "processing":   ("⚙ Processing ({name}): {label}", "⚙ İşleniyor ({name}): {label}"),
+    "ready_track":  ("♪ Ready: {label}", "♪ Hazır: {label}"),
+    "prog_dl":      ("Downloading  {pct:.0f}%  •  {spd}  •  ETA {eta}s",
+                     "İndiriliyor  {pct:.0f}%  •  {spd}  •  ETA {eta}s"),
+    "dl_finished":  ("Download finished, processing...", "İndirme bitti, işleniyor..."),
+    "proc_status":  ("Processing: {name} ...", "İşleniyor: {name} ..."),
+    "done":         ("Done! Folder: {folder}", "Bitti! Klasör: {folder}"),
+    "cancelled":    ("Cancelled.", "İptal edildi."),
+    "error":        ("Error: {e}", "Hata: {e}"),
+}
 
 
 def set_app_id():
@@ -157,6 +218,9 @@ class App:
     def __init__(self, root):
         self.root = root
         self.cfg = load_config()
+        self.lang = self.cfg.get("ui_lang", "en")
+        if self.lang not in ("en", "tr"):
+            self.lang = "en"
         self.ffmpeg_dir = find_ffmpeg()
         self.msg_queue = queue.Queue()
         self.worker = None
@@ -171,7 +235,16 @@ class App:
         self._build_ui()
         self.root.after(80, self._drain_queue)
         if not self.ffmpeg_dir:
-            self.log("WARNING: ffmpeg not found. Conversion/merging won't work.", ERR)
+            self.log(self.t("ffmpeg_warn"), ERR)
+
+    # ---------------- i18n ----------------
+    def t(self, key, **fmt):
+        """Resolve a translation key for the current language."""
+        pair = I18N.get(key)
+        if not pair:
+            return key
+        s = pair[0] if self.lang == "en" else pair[1]
+        return s.format(**fmt) if fmt else s
 
     # ---------------- UI ----------------
     def _build_ui(self):
@@ -207,12 +280,27 @@ class App:
 
         pad = {"padx": 18}
 
-        ttk.Label(r, text="🎵 MP3 / 🎬 MP4 Downloader", style="Title.TLabel").pack(anchor="w", pady=(14, 2), **pad)
-        ttk.Label(r, text="Paste a link, pick a folder, download. No ads.",
-                  style="Muted.TLabel").pack(anchor="w", pady=(0, 10), **pad)
+        # Header: title on the left, language selector on the right
+        header = ttk.Frame(r)
+        header.pack(fill="x", pady=(14, 2), **pad)
+        self.title_lbl = ttk.Label(header, text=self.t("title"), style="Title.TLabel")
+        self.title_lbl.pack(side="left", anchor="w")
+        lang_box = ttk.Frame(header)
+        lang_box.pack(side="right", anchor="e")
+        self.lang_caption = ttk.Label(lang_box, text=self.t("language"), style="Muted.TLabel")
+        self.lang_caption.pack(side="left", padx=(0, 6))
+        self.lang_display = tk.StringVar(value="English" if self.lang == "en" else "Türkçe")
+        lang_cb = ttk.Combobox(lang_box, textvariable=self.lang_display, state="readonly",
+                               width=10, values=list(LANGUAGES.keys()))
+        lang_cb.pack(side="left")
+        lang_cb.bind("<<ComboboxSelected>>", self._on_lang_change)
+
+        self.subtitle_lbl = ttk.Label(r, text=self.t("subtitle"), style="Muted.TLabel")
+        self.subtitle_lbl.pack(anchor="w", pady=(0, 10), **pad)
 
         # URL
-        ttk.Label(r, text="Video / Playlist link").pack(anchor="w", **pad)
+        self.url_lbl = ttk.Label(r, text=self.t("url_label"))
+        self.url_lbl.pack(anchor="w", **pad)
         self.url_var = tk.StringVar()
         url_entry = ttk.Entry(r, textvariable=self.url_var, font=("Segoe UI", 11))
         url_entry.pack(fill="x", pady=(2, 10), ipady=5, **pad)
@@ -224,7 +312,7 @@ class App:
         self.thumb_box = tk.Frame(prow, bg=BG2, width=256, height=144)
         self.thumb_box.pack()
         self.thumb_box.pack_propagate(False)
-        placeholder = "🎬  Preview" if HAVE_PIL else "Preview needs Pillow (pip install pillow)"
+        placeholder = self.t("preview_ph") if HAVE_PIL else self.t("preview_pil")
         self.thumb_label = tk.Label(self.thumb_box, bg=BG2, fg=MUTED,
                                     text=placeholder, font=("Segoe UI", 9), wraplength=240)
         self.thumb_label.pack(fill="both", expand=True)
@@ -234,45 +322,52 @@ class App:
         self.url_var.trace_add("write", self._on_url_change)
 
         # Folder
-        ttk.Label(r, text="Save folder").pack(anchor="w", **pad)
+        self.folder_lbl = ttk.Label(r, text=self.t("folder_label"))
+        self.folder_lbl.pack(anchor="w", **pad)
         frow = ttk.Frame(r)
         frow.pack(fill="x", pady=(2, 10), **pad)
         default_dir = self.cfg.get("folder") or os.path.join(os.path.expanduser("~"), "Music")
         self.folder_var = tk.StringVar(value=default_dir)
         ttk.Entry(frow, textvariable=self.folder_var, font=("Segoe UI", 10)).pack(
             side="left", fill="x", expand=True, ipady=5)
-        ttk.Button(frow, text="Browse", command=self._browse).pack(side="left", padx=(8, 0))
+        self.browse_btn = ttk.Button(frow, text=self.t("browse"), command=self._browse)
+        self.browse_btn.pack(side="left", padx=(8, 0))
 
         # Mode: Audio / Video
         mrow = ttk.Frame(r)
         mrow.pack(fill="x", pady=(2, 8), **pad)
-        ttk.Label(mrow, text="Mode").pack(side="left", padx=(0, 10))
+        self.mode_lbl = ttk.Label(mrow, text=self.t("mode"))
+        self.mode_lbl.pack(side="left", padx=(0, 10))
         self.mode_var = tk.StringVar(value=self.cfg.get("mode", "audio"))
-        ttk.Radiobutton(mrow, text="🎵 Audio (MP3)", value="audio", variable=self.mode_var,
-                        command=self._on_mode_change).pack(side="left", padx=(0, 14))
-        ttk.Radiobutton(mrow, text="🎬 Video (MP4)", value="video", variable=self.mode_var,
-                        command=self._on_mode_change).pack(side="left")
+        self.audio_rb = ttk.Radiobutton(mrow, text=self.t("audio_mode"), value="audio",
+                                        variable=self.mode_var, command=self._on_mode_change)
+        self.audio_rb.pack(side="left", padx=(0, 14))
+        self.video_rb = ttk.Radiobutton(mrow, text=self.t("video_mode"), value="video",
+                                        variable=self.mode_var, command=self._on_mode_change)
+        self.video_rb.pack(side="left")
 
         # Quality + Format + Speed
         orow = ttk.Frame(r)
         orow.pack(fill="x", pady=(2, 10), **pad)
-        self.quality_label = ttk.Label(orow, text="Quality (kbps)")
+        self.quality_label = ttk.Label(orow, text=self.t("quality_kbps"))
         self.quality_label.pack(side="left")
         self.quality_var = tk.StringVar(value=self.cfg.get("quality", "320"))
         self.quality_cb = ttk.Combobox(orow, textvariable=self.quality_var, state="readonly", width=8)
         self.quality_cb.pack(side="left", padx=(6, 16))
 
-        ttk.Label(orow, text="Format").pack(side="left")
+        self.format_lbl = ttk.Label(orow, text=self.t("format"))
+        self.format_lbl.pack(side="left")
         self.format_var = tk.StringVar(value=self.cfg.get("format", "mp3"))
         self.format_cb = ttk.Combobox(orow, textvariable=self.format_var, state="readonly", width=8)
         self.format_cb.pack(side="left", padx=(6, 16))
 
-        ttk.Label(orow, text="Speed limit MB/s").pack(side="left")
+        self.speed_lbl = ttk.Label(orow, text=self.t("speed_limit"))
+        self.speed_lbl.pack(side="left")
         self.rate_var = tk.StringVar(value=self.cfg.get("rate", ""))
         ttk.Entry(orow, textvariable=self.rate_var, width=7).pack(side="left", padx=(6, 0))
 
         # Advanced settings toggle
-        self.adv_btn = ttk.Button(r, text="▸ Advanced settings", command=self._toggle_adv)
+        self.adv_btn = ttk.Button(r, text=self.t("adv_show"), command=self._toggle_adv)
         self.adv_btn.pack(anchor="w", pady=(2, 4), **pad)
 
         # Advanced settings panel
@@ -281,25 +376,31 @@ class App:
 
         a1 = tk.Frame(self.adv_frame, bg=BG2); a1.pack(fill="x", **ap)
         self.playlist_var = tk.BooleanVar(value=self.cfg.get("playlist", True))
-        self._check(a1, "Download playlist", self.playlist_var).pack(side="left", padx=(0, 16))
+        self.playlist_chk = self._check(a1, self.t("playlist"), self.playlist_var)
+        self.playlist_chk.pack(side="left", padx=(0, 16))
         self.meta_var = tk.BooleanVar(value=self.cfg.get("meta", True))
-        self._check(a1, "Embed cover + tags", self.meta_var).pack(side="left", padx=(0, 16))
+        self.meta_chk = self._check(a1, self.t("meta"), self.meta_var)
+        self.meta_chk.pack(side="left", padx=(0, 16))
         self.sponsor_var = tk.BooleanVar(value=self.cfg.get("sponsor", False))
-        self._check(a1, "SponsorBlock (skip sponsors)", self.sponsor_var).pack(side="left")
+        self.sponsor_chk = self._check(a1, self.t("sponsor"), self.sponsor_var)
+        self.sponsor_chk.pack(side="left")
 
         a2 = tk.Frame(self.adv_frame, bg=BG2); a2.pack(fill="x", **ap)
         self.subs_var = tk.BooleanVar(value=self.cfg.get("subs", False))
-        self._check(a2, "Embed subtitles (video)", self.subs_var).pack(side="left", padx=(0, 8))
-        tk.Label(a2, text="lang", bg=BG2, fg=MUTED, font=("Segoe UI", 9)).pack(side="left")
+        self.subs_chk = self._check(a2, self.t("subs"), self.subs_var)
+        self.subs_chk.pack(side="left", padx=(0, 8))
+        self.lang_word_lbl = tk.Label(a2, text=self.t("lang_word"), bg=BG2, fg=MUTED, font=("Segoe UI", 9))
+        self.lang_word_lbl.pack(side="left")
         self.sublang_var = tk.StringVar(value=self.cfg.get("sublang", "en"))
         ttk.Entry(a2, textvariable=self.sublang_var, width=10).pack(side="left", padx=(4, 16))
-        tk.Label(a2, text="Concurrent fragments", bg=BG2, fg=FG, font=("Segoe UI", 9)).pack(side="left")
+        self.frag_lbl = tk.Label(a2, text=self.t("frag"), bg=BG2, fg=FG, font=("Segoe UI", 9))
+        self.frag_lbl.pack(side="left")
         self.frag_var = tk.IntVar(value=self.cfg.get("frag", 8))
         ttk.Spinbox(a2, from_=1, to=32, textvariable=self.frag_var, width=5).pack(side="left", padx=(4, 0))
 
         a3 = tk.Frame(self.adv_frame, bg=BG2); a3.pack(fill="x", **ap)
-        tk.Label(a3, text="Browser cookies (for age/member restricted)", bg=BG2, fg=FG,
-                 font=("Segoe UI", 9)).pack(side="left")
+        self.cookies_lbl = tk.Label(a3, text=self.t("cookies"), bg=BG2, fg=FG, font=("Segoe UI", 9))
+        self.cookies_lbl.pack(side="left")
         cookies_cfg = self.cfg.get("cookies", "none")
         if cookies_cfg == "yok":               # migrate legacy value
             cookies_cfg = "none"
@@ -309,7 +410,8 @@ class App:
             side="left", padx=(6, 0))
 
         a4 = tk.Frame(self.adv_frame, bg=BG2); a4.pack(fill="x", **ap)
-        tk.Label(a4, text="Filename template", bg=BG2, fg=FG, font=("Segoe UI", 9)).pack(side="left")
+        self.tmpl_lbl = tk.Label(a4, text=self.t("tmpl"), bg=BG2, fg=FG, font=("Segoe UI", 9))
+        self.tmpl_lbl.pack(side="left")
         self.tmpl_var = tk.StringVar(value=self.cfg.get("tmpl", "%(title)s"))
         ttk.Entry(a4, textvariable=self.tmpl_var, font=("Consolas", 9)).pack(
             side="left", fill="x", expand=True, padx=(6, 0), ipady=2)
@@ -317,20 +419,20 @@ class App:
         # Download / cancel
         brow = ttk.Frame(r)
         brow.pack(fill="x", pady=(8, 8), **pad)
-        self.download_btn = ttk.Button(brow, text="⬇  Download", style="Accent.TButton", command=self._start)
+        self.download_btn = ttk.Button(brow, text=self.t("download"), style="Accent.TButton", command=self._start)
         self.download_btn.pack(side="left", ipadx=14, ipady=6)
-        self.cancel_btn = ttk.Button(brow, text="Cancel", command=self._cancel, state="disabled")
+        self.cancel_btn = ttk.Button(brow, text=self.t("cancel"), command=self._cancel, state="disabled")
         self.cancel_btn.pack(side="left", padx=(8, 0), ipady=6)
 
         # Progress
         self.progress = ttk.Progressbar(r, style="Horizontal.TProgressbar", maximum=100)
         self.progress.pack(fill="x", pady=(2, 4), **pad)
-        self.status_var = tk.StringVar(value="Ready.")
+        self.status_var = tk.StringVar(value=self.t("ready"))
         ttk.Label(r, textvariable=self.status_var, style="Muted.TLabel").pack(anchor="w", **pad)
 
         # Log
         lf = tk.Frame(r, bg=BG2)
-        lf.pack(fill="both", expand=True, pady=(8, 14), **pad)
+        lf.pack(fill="both", expand=True, pady=(8, 6), **pad)
         self.log_box = tk.Text(lf, bg=BG2, fg=FG, bd=0, font=("Consolas", 9), wrap="word",
                                padx=10, pady=8, state="disabled", highlightthickness=0)
         self.log_box.pack(side="left", fill="both", expand=True)
@@ -340,6 +442,19 @@ class App:
         self.log_box.tag_config("ok", foreground=OK)
         self.log_box.tag_config("err", foreground=ERR)
         self.log_box.tag_config("muted", foreground=MUTED)
+
+        # Footer: developed by devbgr (clickable link)
+        footer = ttk.Frame(r)
+        footer.pack(fill="x", pady=(0, 10), **pad)
+        inner = ttk.Frame(footer)
+        inner.pack(anchor="center")
+        ttk.Label(inner, text="developed by ", style="Muted.TLabel").pack(side="left")
+        link = tk.Label(inner, text="devbgr", bg=BG, fg=ACCENT, cursor="hand2",
+                        font=("Segoe UI", 9, "underline"))
+        link.pack(side="left")
+        link.bind("<Button-1>", lambda _e: webbrowser.open(AUTHOR_URL))
+        link.bind("<Enter>", lambda _e: link.config(fg=ACCENT_HOVER))
+        link.bind("<Leave>", lambda _e: link.config(fg=ACCENT))
 
         self._on_mode_change(save=False)
 
@@ -374,6 +489,48 @@ class App:
                               activebackground=BG2, activeforeground=FG, font=("Segoe UI", 9),
                               bd=0, highlightthickness=0)
 
+    def _on_lang_change(self, *_):
+        self.lang = LANGUAGES.get(self.lang_display.get(), "en")
+        self._retranslate()
+        cfg = load_config()                      # persist without touching other fields
+        cfg["ui_lang"] = self.lang
+        save_config(cfg)
+
+    def _retranslate(self):
+        """Re-apply every static label/button for the current language."""
+        self.root.title(APP_NAME)
+        self.title_lbl.config(text=self.t("title"))
+        self.subtitle_lbl.config(text=self.t("subtitle"))
+        self.lang_caption.config(text=self.t("language"))
+        self.url_lbl.config(text=self.t("url_label"))
+        self.folder_lbl.config(text=self.t("folder_label"))
+        self.browse_btn.config(text=self.t("browse"))
+        self.mode_lbl.config(text=self.t("mode"))
+        self.audio_rb.config(text=self.t("audio_mode"))
+        self.video_rb.config(text=self.t("video_mode"))
+        self.format_lbl.config(text=self.t("format"))
+        self.speed_lbl.config(text=self.t("speed_limit"))
+        self.playlist_chk.config(text=self.t("playlist"))
+        self.meta_chk.config(text=self.t("meta"))
+        self.sponsor_chk.config(text=self.t("sponsor"))
+        self.subs_chk.config(text=self.t("subs"))
+        self.lang_word_lbl.config(text=self.t("lang_word"))
+        self.frag_lbl.config(text=self.t("frag"))
+        self.cookies_lbl.config(text=self.t("cookies"))
+        self.tmpl_lbl.config(text=self.t("tmpl"))
+        self.download_btn.config(text=self.t("download"))
+        self.cancel_btn.config(text=self.t("cancel"))
+        # Texts that also depend on state
+        self.adv_btn.config(text=self.t("adv_hide") if self.adv_visible else self.t("adv_show"))
+        self.quality_label.config(
+            text=self.t("quality_kbps") if self.mode_var.get() == "audio" else self.t("resolution"))
+        # Idle preview placeholder (skip if an image is currently shown)
+        if self._thumb_img is None:
+            self.thumb_label.config(text=self.t("preview_ph") if HAVE_PIL else self.t("preview_pil"))
+        # Status line, only while still on the default "Ready." message
+        if self.status_var.get() in (I18N["ready"][0], I18N["ready"][1]):
+            self.status_var.set(self.t("ready"))
+
     # ---------------- Actions ----------------
     def _browse(self):
         d = filedialog.askdirectory(initialdir=self.folder_var.get() or os.path.expanduser("~"))
@@ -384,14 +541,14 @@ class App:
         self.adv_visible = not self.adv_visible
         if self.adv_visible:
             self.adv_frame.pack(fill="x", padx=18, pady=(0, 6), before=self.download_btn.master)
-            self.adv_btn.config(text="▾ Advanced settings")
+            self.adv_btn.config(text=self.t("adv_hide"))
         else:
             self.adv_frame.pack_forget()
-            self.adv_btn.config(text="▸ Advanced settings")
+            self.adv_btn.config(text=self.t("adv_show"))
 
     def _on_mode_change(self, save=True):
         if self.mode_var.get() == "audio":
-            self.quality_label.config(text="Quality (kbps)")
+            self.quality_label.config(text=self.t("quality_kbps"))
             self.quality_cb.config(values=AUDIO_QUALITIES)
             self.format_cb.config(values=AUDIO_FORMATS)
             if self.quality_var.get() not in AUDIO_QUALITIES:
@@ -399,7 +556,7 @@ class App:
             if self.format_var.get() not in AUDIO_FORMATS:
                 self.format_var.set("mp3")
         else:
-            self.quality_label.config(text="Resolution")
+            self.quality_label.config(text=self.t("resolution"))
             self.quality_cb.config(values=VIDEO_QUALITIES)
             self.format_cb.config(values=VIDEO_FORMATS)
             if self.quality_var.get() not in VIDEO_QUALITIES:
@@ -425,16 +582,17 @@ class App:
             "frag": int(self.frag_var.get() or 8),
             "cookies": self.cookies_var.get(),
             "tmpl": self.tmpl_var.get().strip() or "%(title)s",
+            "ui_lang": self.lang,
         }
 
     def _start(self):
         url = self.url_var.get().strip()
         c = self._gather_cfg()
         if not url:
-            messagebox.showwarning(APP_NAME, "Please enter a link.")
+            messagebox.showwarning(APP_NAME, self.t("warn_link"))
             return
         if not c["folder"]:
-            messagebox.showwarning(APP_NAME, "Please choose a save folder.")
+            messagebox.showwarning(APP_NAME, self.t("warn_folder"))
             return
         os.makedirs(c["folder"], exist_ok=True)
         save_config(c)
@@ -445,14 +603,14 @@ class App:
         self.download_btn.config(state="disabled")
         self.cancel_btn.config(state="normal")
         self.progress["value"] = 0
-        self.log(f"Starting [{c['mode']}]: {url}", MUTED)
+        self.log(self.t("starting", mode=c["mode"], url=url), MUTED)
 
         self.worker = threading.Thread(target=self._download_thread, args=(url, c), daemon=True)
         self.worker.start()
 
     def _cancel(self):
         self.cancel_flag.set()
-        self.log("Cancelling...", ERR)
+        self.log(self.t("cancelling"), ERR)
         self.cancel_btn.config(state="disabled")
 
     # ---------------- yt-dlp hooks ----------------
@@ -476,31 +634,31 @@ class App:
             fn = d.get("filename") or d.get("info_dict", {}).get("filename")
             if fn and fn != self._cur_file:
                 self._cur_file = fn
-                self.log("⬇ Downloading: " + self._track_label(d.get("info_dict")), None)
+                self.log(self.t("downloading", label=self._track_label(d.get("info_dict"))), None)
             total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
             done = d.get("downloaded_bytes", 0)
             pct = (done / total * 100) if total else 0
             speed = d.get("speed") or 0
             eta = d.get("eta") or 0
             spd = f"{speed/1024/1024:.1f} MB/s" if speed else "-"
-            self.msg_queue.put(("progress", pct, f"Downloading  {pct:.0f}%  •  {spd}  •  ETA {eta}s"))
+            self.msg_queue.put(("progress", pct, self.t("prog_dl", pct=pct, spd=spd, eta=eta)))
         elif d.get("status") == "finished":
-            self.log("✓ Downloaded: " + self._track_label(d.get("info_dict")), OK)
-            self.msg_queue.put(("progress", 100, "Download finished, processing..."))
+            self.log(self.t("downloaded", label=self._track_label(d.get("info_dict"))), OK)
+            self.msg_queue.put(("progress", 100, self.t("dl_finished")))
         elif d.get("status") == "error":
-            self.log("✗ Failed: " + self._track_label(d.get("info_dict")), ERR)
+            self.log(self.t("failed", label=self._track_label(d.get("info_dict"))), ERR)
 
     def _postproc_hook(self, d):
         name = d.get("postprocessor", "")
         label = self._track_label(d.get("info_dict"))
         if d.get("status") == "started":
-            self.msg_queue.put(("status", f"Processing: {name} ..."))
+            self.msg_queue.put(("status", self.t("proc_status", name=name)))
             key = (name, label)
             if key != self._last_pp:           # skip duplicate started events
                 self._last_pp = key
-                self.log(f"⚙ Processing ({name}): " + label, MUTED)
+                self.log(self.t("processing", name=name, label=label), MUTED)
         elif d.get("status") == "finished" and name in ("FFmpegExtractAudio", "Merger"):
-            self.log("♪ Ready: " + label, OK)
+            self.log(self.t("ready_track", label=label), OK)
 
     # ---------------- Thumbnail preview ----------------
     def _on_url_change(self, *_):
@@ -515,13 +673,13 @@ class App:
         self._thumb_seq += 1                    # invalidate any in-flight load
         if not url:
             self._show_thumb(None, "")
-            self.thumb_label.config(text="🎬  Preview")
+            self.thumb_label.config(text=self.t("preview_ph"))
             return
         if not HAVE_PIL:
             return
         seq = self._thumb_seq
         self.thumb_title.config(text="")
-        self.thumb_label.config(image="", text="Loading preview…")
+        self.thumb_label.config(image="", text=self.t("preview_load"))
         threading.Thread(target=self._fetch_thumbnail, args=(url, seq),
                          daemon=True).start()
 
@@ -561,7 +719,7 @@ class App:
     def _show_thumb(self, im, title):
         if im is None:
             self._thumb_img = None
-            self.thumb_label.config(image="", text="No preview")
+            self.thumb_label.config(image="", text=self.t("preview_none"))
             self.thumb_title.config(text=title or "")
             return
         self._thumb_img = ImageTk.PhotoImage(im)
@@ -635,13 +793,13 @@ class App:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
             if self.cancel_flag.is_set():
-                self.msg_queue.put(("done", False, "Cancelled."))
+                self.msg_queue.put(("done", False, self.t("cancelled")))
             else:
-                self.msg_queue.put(("done", True, f"Done! Folder: {c['folder']}"))
+                self.msg_queue.put(("done", True, self.t("done", folder=c["folder"])))
         except yt_dlp.utils.DownloadCancelled:
-            self.msg_queue.put(("done", False, "Cancelled."))
+            self.msg_queue.put(("done", False, self.t("cancelled")))
         except Exception as e:
-            self.msg_queue.put(("done", False, f"Error: {e}"))
+            self.msg_queue.put(("done", False, self.t("error", e=e)))
 
     # ---------------- Queue ----------------
     def _drain_queue(self):
@@ -683,7 +841,7 @@ class App:
         self._thumb_seq += 1                     # drop any in-flight preview
         self.url_var.set("")                     # also resets preview via trace
         self._show_thumb(None, "")
-        self.thumb_label.config(text="🎬  Preview")
+        self.thumb_label.config(text=self.t("preview_ph"))
 
     # ---------------- Done notification ----------------
     def _notify_done(self):
