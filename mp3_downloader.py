@@ -766,11 +766,22 @@ class App:
                 pps.append({"key": "EmbedThumbnail"})
         else:
             q = c["quality"]
+            # Prefer H.264 (avc1) video + AAC (mp4a) audio so car head units /
+            # multiplayers can play the file. YouTube's "best" is often AV1 +
+            # Opus, which those devices can't decode even inside an .mp4.
+            # Falls back to any codec if H.264/AAC isn't offered.
             if q == "Best":
-                opts["format"] = "bestvideo+bestaudio/best"
+                opts["format"] = (
+                    "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
+                    "bestvideo[vcodec^=avc1]+bestaudio/"
+                    "best[vcodec^=avc1]/"
+                    "bestvideo+bestaudio/best")
             else:
-                opts["format"] = (f"bestvideo[height<={q}]+bestaudio/"
-                                  f"best[height<={q}]/best")
+                opts["format"] = (
+                    f"bestvideo[vcodec^=avc1][height<={q}]+bestaudio[acodec^=mp4a]/"
+                    f"bestvideo[vcodec^=avc1][height<={q}]+bestaudio/"
+                    f"best[vcodec^=avc1][height<={q}]/"
+                    f"bestvideo[height<={q}]+bestaudio/best[height<={q}]/best")
             opts["merge_output_format"] = c["format"]
             if c["meta"]:
                 pps.append({"key": "FFmpegMetadata", "add_metadata": True})
