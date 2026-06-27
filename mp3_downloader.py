@@ -1,0 +1,597 @@
+#!/usr/bin/env python3
+"""
+MP3 / MP4 Downloader - fast, ad-free downloader for YouTube.
+Tkinter GUI + yt-dlp + ffmpeg. Single file, no external GUI dependency.
+
+Features:
+  - Audio (mp3/m4a/wav/flac/opus) or Video (mp4/mkv/webm) mode
+  - Quality selection: audio bitrate or video resolution
+  - Speed limit (MB/s)
+  - Advanced settings: concurrent fragments, playlist, cover+tags,
+    subtitles, SponsorBlock, filename template, browser cookies
+"""
+
+import os
+import sys
+import glob
+import json
+import time
+import queue
+import shutil
+import threading
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+
+try:
+    import yt_dlp
+except ImportError:
+    print("yt-dlp is not installed. Install: python -m pip install yt-dlp")
+    sys.exit(1)
+
+
+APP_NAME = "MP3 / MP4 Downloader"
+CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".mp3_downloader.json")
+
+# ---------- Theme ----------
+BG = "#1e1e2e"
+BG2 = "#27293d"
+FG = "#e0e0e0"
+ACCENT = "#7c5cff"
+ACCENT_HOVER = "#9277ff"
+OK = "#3ddc97"
+ERR = "#ff5c7c"
+MUTED = "#8a8aa0"
+
+AUDIO_FORMATS = ["mp3", "m4a", "wav", "flac", "opus"]
+VIDEO_FORMATS = ["mp4", "mkv", "webm"]
+AUDIO_QUALITIES = ["320", "256", "192", "128", "96"]
+VIDEO_QUALITIES = ["Best", "2160", "1440", "1080", "720", "480", "360"]
+
+
+def set_app_id():
+    """Tell Windows this is its own app so the taskbar shows our icon."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "mp3downloader.app")
+    except Exception:
+        pass
+
+
+def make_icon():
+    """Build a 64x64 app icon (purple tile + white music note) as a PhotoImage."""
+    W = H = 64
+    bg = ACCENT
+    note = "#ffffff"
+    # note head: ellipse; stem: vertical bar; flag: small slanted bar
+    hx, hy, rx, ry = 23, 45, 11, 8
+    rows = []
+    for y in range(H):
+        row = []
+        for x in range(W):
+            px = bg
+            if ((x - hx) / rx) ** 2 + ((y - hy) / ry) ** 2 <= 1.0:
+                px = note                      # note head
+            elif 32 <= x <= 35 and 15 <= y <= 45:
+                px = note                      # stem
+            elif 35 <= x <= 47 and (x - 35) >= (y - 15) >= (x - 35) - 5 and y <= 27:
+                px = note                      # flag
+            row.append(px)
+        rows.append("{" + " ".join(row) + "}")
+    img = tk.PhotoImage(width=W, height=H)
+    img.put(" ".join(rows))
+    return img
+
+
+def find_ffmpeg():
+    """Find ffmpeg.exe: PATH -> winget packages -> app folder."""
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return os.path.dirname(exe)
+    candidates = []
+    local = os.environ.get("LOCALAPPDATA", "")
+    if local:
+        candidates += glob.glob(
+            os.path.join(local, "Microsoft", "WinGet", "Packages",
+                         "Gyan.FFmpeg*", "**", "bin", "ffmpeg.exe"),
+            recursive=True,
+        )
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates += glob.glob(os.path.join(here, "**", "ffmpeg.exe"), recursive=True)
+    for c in candidates:
+        if os.path.isfile(c):
+            return os.path.dirname(c)
+    return None
+
+
+def load_config():
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_config(data):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+
+class YtdlpLogger:
+    """Forwards only yt-dlp errors to the log box; the rest is noise.
+
+    Our own progress/post-process hooks already print the clean lines
+    (⬇ / ✓ / ⚙ / ♪ / Done), so info/debug/warning chatter is dropped.
+    """
+
+    def __init__(self, log_fn):
+        self._log = log_fn
+
+    def debug(self, msg):
+        pass
+
+    def info(self, msg):
+        pass
+
+    def warning(self, msg):
+        pass
+
+    def error(self, msg):
+        self._log("ERROR: " + msg, ERR)
+
+
+class App:
+    def __init__(self, root):
+        self.root = root
+        self.cfg = load_config()
+        self.ffmpeg_dir = find_ffmpeg()
+        self.msg_queue = queue.Queue()
+        self.worker = None
+        self.cancel_flag = threading.Event()
+        self.adv_visible = False
+        self._cur_file = None
+        self._last_pp = None
+
+        self._build_ui()
+        self.root.after(80, self._drain_queue)
+        if not self.ffmpeg_dir:
+            self.log("WARNING: ffmpeg not found. Conversion/merging won't work.", ERR)
+
+    # ---------------- UI ----------------
+    def _build_ui(self):
+        r = self.root
+        r.title(APP_NAME)
+        r.configure(bg=BG)
+        self._set_icon()
+        self._center_window(700, 720)
+        r.minsize(660, 640)
+
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        style.configure("TFrame", background=BG)
+        style.configure("TLabel", background=BG, foreground=FG, font=("Segoe UI", 10))
+        style.configure("Title.TLabel", background=BG, foreground=FG, font=("Segoe UI Semibold", 18))
+        style.configure("Muted.TLabel", background=BG, foreground=MUTED, font=("Segoe UI", 9))
+        style.configure("TEntry", fieldbackground=BG2, foreground=FG, insertcolor=FG, relief="flat")
+        style.configure("TCombobox", fieldbackground=BG2, background=BG2, foreground=FG, arrowcolor=FG)
+        style.map("TCombobox", fieldbackground=[("readonly", BG2)], foreground=[("readonly", FG)])
+        style.configure("TSpinbox", fieldbackground=BG2, foreground=FG, arrowcolor=FG)
+        style.configure("Accent.TButton", background=ACCENT, foreground="white",
+                        font=("Segoe UI Semibold", 11), borderwidth=0)
+        style.map("Accent.TButton", background=[("active", ACCENT_HOVER), ("disabled", "#444")])
+        style.configure("TButton", background=BG2, foreground=FG, borderwidth=0)
+        style.map("TButton", background=[("active", "#34374f")])
+        style.configure("Horizontal.TProgressbar", background=ACCENT, troughcolor=BG2,
+                        borderwidth=0, thickness=14)
+        style.configure("TRadiobutton", background=BG, foreground=FG, font=("Segoe UI", 10))
+        style.map("TRadiobutton", background=[("active", BG)])
+
+        pad = {"padx": 18}
+
+        ttk.Label(r, text="🎵 MP3 / 🎬 MP4 Downloader", style="Title.TLabel").pack(anchor="w", pady=(14, 2), **pad)
+        ttk.Label(r, text="Paste a link, pick a folder, download. No ads.",
+                  style="Muted.TLabel").pack(anchor="w", pady=(0, 10), **pad)
+
+        # URL
+        ttk.Label(r, text="Video / Playlist link").pack(anchor="w", **pad)
+        self.url_var = tk.StringVar()
+        url_entry = ttk.Entry(r, textvariable=self.url_var, font=("Segoe UI", 11))
+        url_entry.pack(fill="x", pady=(2, 10), ipady=5, **pad)
+        url_entry.focus()
+
+        # Folder
+        ttk.Label(r, text="Save folder").pack(anchor="w", **pad)
+        frow = ttk.Frame(r)
+        frow.pack(fill="x", pady=(2, 10), **pad)
+        default_dir = self.cfg.get("folder") or os.path.join(os.path.expanduser("~"), "Music")
+        self.folder_var = tk.StringVar(value=default_dir)
+        ttk.Entry(frow, textvariable=self.folder_var, font=("Segoe UI", 10)).pack(
+            side="left", fill="x", expand=True, ipady=5)
+        ttk.Button(frow, text="Browse", command=self._browse).pack(side="left", padx=(8, 0))
+
+        # Mode: Audio / Video
+        mrow = ttk.Frame(r)
+        mrow.pack(fill="x", pady=(2, 8), **pad)
+        ttk.Label(mrow, text="Mode").pack(side="left", padx=(0, 10))
+        self.mode_var = tk.StringVar(value=self.cfg.get("mode", "audio"))
+        ttk.Radiobutton(mrow, text="🎵 Audio (MP3)", value="audio", variable=self.mode_var,
+                        command=self._on_mode_change).pack(side="left", padx=(0, 14))
+        ttk.Radiobutton(mrow, text="🎬 Video (MP4)", value="video", variable=self.mode_var,
+                        command=self._on_mode_change).pack(side="left")
+
+        # Quality + Format + Speed
+        orow = ttk.Frame(r)
+        orow.pack(fill="x", pady=(2, 10), **pad)
+        self.quality_label = ttk.Label(orow, text="Quality (kbps)")
+        self.quality_label.pack(side="left")
+        self.quality_var = tk.StringVar(value=self.cfg.get("quality", "320"))
+        self.quality_cb = ttk.Combobox(orow, textvariable=self.quality_var, state="readonly", width=8)
+        self.quality_cb.pack(side="left", padx=(6, 16))
+
+        ttk.Label(orow, text="Format").pack(side="left")
+        self.format_var = tk.StringVar(value=self.cfg.get("format", "mp3"))
+        self.format_cb = ttk.Combobox(orow, textvariable=self.format_var, state="readonly", width=8)
+        self.format_cb.pack(side="left", padx=(6, 16))
+
+        ttk.Label(orow, text="Speed limit MB/s").pack(side="left")
+        self.rate_var = tk.StringVar(value=self.cfg.get("rate", ""))
+        ttk.Entry(orow, textvariable=self.rate_var, width=7).pack(side="left", padx=(6, 0))
+
+        # Advanced settings toggle
+        self.adv_btn = ttk.Button(r, text="▸ Advanced settings", command=self._toggle_adv)
+        self.adv_btn.pack(anchor="w", pady=(2, 4), **pad)
+
+        # Advanced settings panel
+        self.adv_frame = tk.Frame(r, bg=BG2)
+        ap = {"padx": 12, "pady": 3}
+
+        a1 = tk.Frame(self.adv_frame, bg=BG2); a1.pack(fill="x", **ap)
+        self.playlist_var = tk.BooleanVar(value=self.cfg.get("playlist", True))
+        self._check(a1, "Download playlist", self.playlist_var).pack(side="left", padx=(0, 16))
+        self.meta_var = tk.BooleanVar(value=self.cfg.get("meta", True))
+        self._check(a1, "Embed cover + tags", self.meta_var).pack(side="left", padx=(0, 16))
+        self.sponsor_var = tk.BooleanVar(value=self.cfg.get("sponsor", False))
+        self._check(a1, "SponsorBlock (skip sponsors)", self.sponsor_var).pack(side="left")
+
+        a2 = tk.Frame(self.adv_frame, bg=BG2); a2.pack(fill="x", **ap)
+        self.subs_var = tk.BooleanVar(value=self.cfg.get("subs", False))
+        self._check(a2, "Embed subtitles (video)", self.subs_var).pack(side="left", padx=(0, 8))
+        tk.Label(a2, text="lang", bg=BG2, fg=MUTED, font=("Segoe UI", 9)).pack(side="left")
+        self.sublang_var = tk.StringVar(value=self.cfg.get("sublang", "en"))
+        ttk.Entry(a2, textvariable=self.sublang_var, width=10).pack(side="left", padx=(4, 16))
+        tk.Label(a2, text="Concurrent fragments", bg=BG2, fg=FG, font=("Segoe UI", 9)).pack(side="left")
+        self.frag_var = tk.IntVar(value=self.cfg.get("frag", 8))
+        ttk.Spinbox(a2, from_=1, to=32, textvariable=self.frag_var, width=5).pack(side="left", padx=(4, 0))
+
+        a3 = tk.Frame(self.adv_frame, bg=BG2); a3.pack(fill="x", **ap)
+        tk.Label(a3, text="Browser cookies (for age/member restricted)", bg=BG2, fg=FG,
+                 font=("Segoe UI", 9)).pack(side="left")
+        cookies_cfg = self.cfg.get("cookies", "none")
+        if cookies_cfg == "yok":               # migrate legacy value
+            cookies_cfg = "none"
+        self.cookies_var = tk.StringVar(value=cookies_cfg)
+        ttk.Combobox(a3, textvariable=self.cookies_var, state="readonly", width=10,
+                     values=["none", "chrome", "edge", "firefox", "brave", "opera"]).pack(
+            side="left", padx=(6, 0))
+
+        a4 = tk.Frame(self.adv_frame, bg=BG2); a4.pack(fill="x", **ap)
+        tk.Label(a4, text="Filename template", bg=BG2, fg=FG, font=("Segoe UI", 9)).pack(side="left")
+        self.tmpl_var = tk.StringVar(value=self.cfg.get("tmpl", "%(title)s"))
+        ttk.Entry(a4, textvariable=self.tmpl_var, font=("Consolas", 9)).pack(
+            side="left", fill="x", expand=True, padx=(6, 0), ipady=2)
+
+        # Download / cancel
+        brow = ttk.Frame(r)
+        brow.pack(fill="x", pady=(8, 8), **pad)
+        self.download_btn = ttk.Button(brow, text="⬇  Download", style="Accent.TButton", command=self._start)
+        self.download_btn.pack(side="left", ipadx=14, ipady=6)
+        self.cancel_btn = ttk.Button(brow, text="Cancel", command=self._cancel, state="disabled")
+        self.cancel_btn.pack(side="left", padx=(8, 0), ipady=6)
+
+        # Progress
+        self.progress = ttk.Progressbar(r, style="Horizontal.TProgressbar", maximum=100)
+        self.progress.pack(fill="x", pady=(2, 4), **pad)
+        self.status_var = tk.StringVar(value="Ready.")
+        ttk.Label(r, textvariable=self.status_var, style="Muted.TLabel").pack(anchor="w", **pad)
+
+        # Log
+        lf = tk.Frame(r, bg=BG2)
+        lf.pack(fill="both", expand=True, pady=(8, 14), **pad)
+        self.log_box = tk.Text(lf, bg=BG2, fg=FG, bd=0, font=("Consolas", 9), wrap="word",
+                               padx=10, pady=8, state="disabled", highlightthickness=0)
+        self.log_box.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(lf, command=self.log_box.yview)
+        sb.pack(side="right", fill="y")
+        self.log_box.configure(yscrollcommand=sb.set)
+        self.log_box.tag_config("ok", foreground=OK)
+        self.log_box.tag_config("err", foreground=ERR)
+        self.log_box.tag_config("muted", foreground=MUTED)
+
+        self._on_mode_change(save=False)
+
+    def _set_icon(self):
+        """Use a user-supplied .ico if present, else a generated icon."""
+        here = os.path.dirname(os.path.abspath(__file__))
+        ico = os.path.join(here, "mp3_downloader.ico")
+        if os.path.isfile(ico):
+            try:
+                self.root.iconbitmap(default=ico)
+                return
+            except Exception:
+                pass
+        try:
+            self._icon = make_icon()          # keep a reference (avoid GC)
+            self.root.iconphoto(True, self._icon)
+        except Exception:
+            pass
+
+    def _center_window(self, w, h):
+        """Always open the window in the center of the screen."""
+        r = self.root
+        r.update_idletasks()
+        sw = r.winfo_screenwidth()
+        sh = r.winfo_screenheight()
+        x = max(0, (sw - w) // 2)
+        y = max(0, (sh - h) // 2)
+        r.geometry(f"{w}x{h}+{x}+{y}")
+
+    def _check(self, parent, text, var):
+        return tk.Checkbutton(parent, text=text, variable=var, bg=BG2, fg=FG, selectcolor=BG,
+                              activebackground=BG2, activeforeground=FG, font=("Segoe UI", 9),
+                              bd=0, highlightthickness=0)
+
+    # ---------------- Actions ----------------
+    def _browse(self):
+        d = filedialog.askdirectory(initialdir=self.folder_var.get() or os.path.expanduser("~"))
+        if d:
+            self.folder_var.set(d)
+
+    def _toggle_adv(self):
+        self.adv_visible = not self.adv_visible
+        if self.adv_visible:
+            self.adv_frame.pack(fill="x", padx=18, pady=(0, 6), before=self.download_btn.master)
+            self.adv_btn.config(text="▾ Advanced settings")
+        else:
+            self.adv_frame.pack_forget()
+            self.adv_btn.config(text="▸ Advanced settings")
+
+    def _on_mode_change(self, save=True):
+        if self.mode_var.get() == "audio":
+            self.quality_label.config(text="Quality (kbps)")
+            self.quality_cb.config(values=AUDIO_QUALITIES)
+            self.format_cb.config(values=AUDIO_FORMATS)
+            if self.quality_var.get() not in AUDIO_QUALITIES:
+                self.quality_var.set("320")
+            if self.format_var.get() not in AUDIO_FORMATS:
+                self.format_var.set("mp3")
+        else:
+            self.quality_label.config(text="Resolution")
+            self.quality_cb.config(values=VIDEO_QUALITIES)
+            self.format_cb.config(values=VIDEO_FORMATS)
+            if self.quality_var.get() not in VIDEO_QUALITIES:
+                self.quality_var.set("1080")
+            if self.format_var.get() not in VIDEO_FORMATS:
+                self.format_var.set("mp4")
+
+    def log(self, text, color=None):
+        self.msg_queue.put(("log", text, color))
+
+    def _gather_cfg(self):
+        return {
+            "folder": self.folder_var.get().strip(),
+            "mode": self.mode_var.get(),
+            "quality": self.quality_var.get(),
+            "format": self.format_var.get(),
+            "rate": self.rate_var.get().strip(),
+            "playlist": self.playlist_var.get(),
+            "meta": self.meta_var.get(),
+            "sponsor": self.sponsor_var.get(),
+            "subs": self.subs_var.get(),
+            "sublang": self.sublang_var.get().strip(),
+            "frag": int(self.frag_var.get() or 8),
+            "cookies": self.cookies_var.get(),
+            "tmpl": self.tmpl_var.get().strip() or "%(title)s",
+        }
+
+    def _start(self):
+        url = self.url_var.get().strip()
+        c = self._gather_cfg()
+        if not url:
+            messagebox.showwarning(APP_NAME, "Please enter a link.")
+            return
+        if not c["folder"]:
+            messagebox.showwarning(APP_NAME, "Please choose a save folder.")
+            return
+        os.makedirs(c["folder"], exist_ok=True)
+        save_config(c)
+
+        self.cancel_flag.clear()
+        self._cur_file = None
+        self._last_pp = None
+        self.download_btn.config(state="disabled")
+        self.cancel_btn.config(state="normal")
+        self.progress["value"] = 0
+        self.log(f"Starting [{c['mode']}]: {url}", MUTED)
+
+        self.worker = threading.Thread(target=self._download_thread, args=(url, c), daemon=True)
+        self.worker.start()
+
+    def _cancel(self):
+        self.cancel_flag.set()
+        self.log("Cancelling...", ERR)
+        self.cancel_btn.config(state="disabled")
+
+    # ---------------- yt-dlp hooks ----------------
+    def _track_label(self, info):
+        """Build a 'track name' from info_dict, with playlist position if any."""
+        info = info or {}
+        title = info.get("title") or os.path.basename(info.get("filename", "")) or "track"
+        idx = info.get("playlist_index")
+        n = info.get("n_entries") or info.get("playlist_count")
+        if idx and n:
+            return f"[{idx}/{n}] {title}"
+        if idx:
+            return f"[{idx}] {title}"
+        return title
+
+    def _progress_hook(self, d):
+        if self.cancel_flag.is_set():
+            raise yt_dlp.utils.DownloadCancelled()
+        if d.get("status") == "downloading":
+            # Write the "downloading" line only once per track.
+            fn = d.get("filename") or d.get("info_dict", {}).get("filename")
+            if fn and fn != self._cur_file:
+                self._cur_file = fn
+                self.log("⬇ Downloading: " + self._track_label(d.get("info_dict")), None)
+            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            done = d.get("downloaded_bytes", 0)
+            pct = (done / total * 100) if total else 0
+            speed = d.get("speed") or 0
+            eta = d.get("eta") or 0
+            spd = f"{speed/1024/1024:.1f} MB/s" if speed else "-"
+            self.msg_queue.put(("progress", pct, f"Downloading  {pct:.0f}%  •  {spd}  •  ETA {eta}s"))
+        elif d.get("status") == "finished":
+            self.log("✓ Downloaded: " + self._track_label(d.get("info_dict")), OK)
+            self.msg_queue.put(("progress", 100, "Download finished, processing..."))
+        elif d.get("status") == "error":
+            self.log("✗ Failed: " + self._track_label(d.get("info_dict")), ERR)
+
+    def _postproc_hook(self, d):
+        name = d.get("postprocessor", "")
+        label = self._track_label(d.get("info_dict"))
+        if d.get("status") == "started":
+            self.msg_queue.put(("status", f"Processing: {name} ..."))
+            key = (name, label)
+            if key != self._last_pp:           # skip duplicate started events
+                self._last_pp = key
+                self.log(f"⚙ Processing ({name}): " + label, MUTED)
+        elif d.get("status") == "finished" and name in ("FFmpegExtractAudio", "Merger"):
+            self.log("♪ Ready: " + label, OK)
+
+    # ---------------- Download worker ----------------
+    def _build_opts(self, c):
+        outtmpl = os.path.join(c["folder"], c["tmpl"] + ".%(ext)s")
+        opts = {
+            "outtmpl": outtmpl,
+            "noplaylist": not c["playlist"],
+            "ignoreerrors": True,
+            "quiet": True,
+            "no_warnings": False,
+            "concurrent_fragment_downloads": c["frag"],
+            "progress_hooks": [self._progress_hook],
+            "postprocessor_hooks": [self._postproc_hook],
+            "logger": YtdlpLogger(self.log),
+        }
+        if self.ffmpeg_dir:
+            opts["ffmpeg_location"] = self.ffmpeg_dir
+
+        # Speed limit (MB/s -> byte/s)
+        if c["rate"]:
+            try:
+                opts["ratelimit"] = float(c["rate"].replace(",", ".")) * 1024 * 1024
+            except ValueError:
+                pass
+
+        # Cookies ("none"/"yok" = legacy "no cookies" value)
+        if c["cookies"] and c["cookies"] not in ("none", "yok"):
+            opts["cookiesfrombrowser"] = (c["cookies"],)
+
+        pps = []
+        if c["mode"] == "audio":
+            opts["format"] = "bestaudio/best"
+            pps.append({"key": "FFmpegExtractAudio", "preferredcodec": c["format"],
+                        "preferredquality": c["quality"]})
+            if c["meta"]:
+                opts["writethumbnail"] = True
+                pps.append({"key": "FFmpegMetadata", "add_metadata": True})
+                pps.append({"key": "EmbedThumbnail"})
+        else:
+            q = c["quality"]
+            if q == "Best":
+                opts["format"] = "bestvideo+bestaudio/best"
+            else:
+                opts["format"] = (f"bestvideo[height<={q}]+bestaudio/"
+                                  f"best[height<={q}]/best")
+            opts["merge_output_format"] = c["format"]
+            if c["meta"]:
+                pps.append({"key": "FFmpegMetadata", "add_metadata": True})
+            if c["subs"]:
+                opts["writesubtitles"] = True
+                opts["writeautomaticsub"] = True
+                opts["subtitleslangs"] = [s.strip() for s in c["sublang"].split(",") if s.strip()]
+                pps.append({"key": "FFmpegEmbedSubtitle"})
+
+        if c["sponsor"]:
+            pps.append({"key": "SponsorBlock"})
+            pps.append({"key": "ModifyChapters",
+                        "remove_sponsor_segments": ["sponsor", "selfpromo", "interaction"]})
+
+        opts["postprocessors"] = pps
+        return opts
+
+    def _download_thread(self, url, c):
+        try:
+            opts = self._build_opts(c)
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
+            if self.cancel_flag.is_set():
+                self.msg_queue.put(("done", False, "Cancelled."))
+            else:
+                self.msg_queue.put(("done", True, f"Done! Folder: {c['folder']}"))
+        except yt_dlp.utils.DownloadCancelled:
+            self.msg_queue.put(("done", False, "Cancelled."))
+        except Exception as e:
+            self.msg_queue.put(("done", False, f"Error: {e}"))
+
+    # ---------------- Queue ----------------
+    def _drain_queue(self):
+        try:
+            while True:
+                item = self.msg_queue.get_nowait()
+                kind = item[0]
+                if kind == "log":
+                    self._append_log(item[1], item[2])
+                elif kind == "progress":
+                    self.progress["value"] = item[1]
+                    self.status_var.set(item[2])
+                elif kind == "status":
+                    self.status_var.set(item[1])
+                elif kind == "done":
+                    _, success, msg = item
+                    self.status_var.set(msg)
+                    self._append_log(msg, OK if success else ERR)
+                    if success:
+                        self.progress["value"] = 100
+                    self.download_btn.config(state="normal")
+                    self.cancel_btn.config(state="disabled")
+        except queue.Empty:
+            pass
+        self.root.after(80, self._drain_queue)
+
+    def _append_log(self, text, color=None):
+        tag = {OK: ("ok",), ERR: ("err",), MUTED: ("muted",)}.get(color, ())
+        ts = time.strftime("%H:%M:%S")
+        self.log_box.config(state="normal")
+        self.log_box.insert("end", f"[{ts}] ", ("muted",))
+        self.log_box.insert("end", text + "\n", tag)
+        self.log_box.see("end")
+        self.log_box.config(state="disabled")
+
+
+def main():
+    set_app_id()
+    root = tk.Tk()
+    App(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

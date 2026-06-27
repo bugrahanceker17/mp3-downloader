@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+*.spec
+
+# Sanal ortam
+.venv/
+venv/
+env/
+
+# Uygulama ayarlari (kullaniciya ozel)
+.mp3_downloader.json
+
+# Indirilen medya
+*.mp3
+*.mp4
+*.m4a
+*.wav
+*.flac
+*.opus
+*.mkv
+*.webm
+*.webp
+*.part
+*.ytdl
+
+# ffmpeg (yerel olarak konursa)
+ffmpeg.exe
+ffprobe.exe
+ffplay.exe
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
