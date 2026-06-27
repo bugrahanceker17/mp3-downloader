@@ -13,12 +13,14 @@ Features:
 
 import os
 import sys
+import io
 import glob
 import json
 import time
 import queue
 import shutil
 import threading
+import urllib.request
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -27,6 +29,12 @@ try:
 except ImportError:
     print("yt-dlp is not installed. Install: python -m pip install yt-dlp")
     sys.exit(1)
+
+try:
+    from PIL import Image, ImageTk
+    HAVE_PIL = True
+except ImportError:                            # preview is optional
+    HAVE_PIL = False
 
 
 APP_NAME = "MP3 / MP4 Downloader"
@@ -156,6 +164,9 @@ class App:
         self.adv_visible = False
         self._cur_file = None
         self._last_pp = None
+        self._thumb_img = None                 # keep ref so Tk won't GC it
+        self._thumb_seq = 0                     # ignore stale preview loads
+        self._thumb_after = None
 
         self._build_ui()
         self.root.after(80, self._drain_queue)
@@ -168,8 +179,8 @@ class App:
         r.title(APP_NAME)
         r.configure(bg=BG)
         self._set_icon()
-        self._center_window(700, 720)
-        r.minsize(660, 640)
+        self._center_window(700, 800)
+        r.minsize(660, 720)
 
         style = ttk.Style()
         try:
@@ -206,6 +217,21 @@ class App:
         url_entry = ttk.Entry(r, textvariable=self.url_var, font=("Segoe UI", 11))
         url_entry.pack(fill="x", pady=(2, 10), ipady=5, **pad)
         url_entry.focus()
+
+        # Thumbnail preview (auto-loads a moment after a link is pasted)
+        prow = ttk.Frame(r)
+        prow.pack(fill="x", pady=(0, 8), **pad)
+        self.thumb_box = tk.Frame(prow, bg=BG2, width=256, height=144)
+        self.thumb_box.pack()
+        self.thumb_box.pack_propagate(False)
+        placeholder = "🎬  Preview" if HAVE_PIL else "Preview needs Pillow (pip install pillow)"
+        self.thumb_label = tk.Label(self.thumb_box, bg=BG2, fg=MUTED,
+                                    text=placeholder, font=("Segoe UI", 9), wraplength=240)
+        self.thumb_label.pack(fill="both", expand=True)
+        self.thumb_title = ttk.Label(prow, text="", style="Muted.TLabel",
+                                     wraplength=420, anchor="center", justify="center")
+        self.thumb_title.pack(fill="x", pady=(4, 0))
+        self.url_var.trace_add("write", self._on_url_change)
 
         # Folder
         ttk.Label(r, text="Save folder").pack(anchor="w", **pad)
@@ -476,6 +502,72 @@ class App:
         elif d.get("status") == "finished" and name in ("FFmpegExtractAudio", "Merger"):
             self.log("♪ Ready: " + label, OK)
 
+    # ---------------- Thumbnail preview ----------------
+    def _on_url_change(self, *_):
+        """Debounce: only fetch once the user stops typing/pasting."""
+        if self._thumb_after:
+            self.root.after_cancel(self._thumb_after)
+        self._thumb_after = self.root.after(700, self._request_thumbnail)
+
+    def _request_thumbnail(self):
+        self._thumb_after = None
+        url = self.url_var.get().strip()
+        self._thumb_seq += 1                    # invalidate any in-flight load
+        if not url:
+            self._show_thumb(None, "")
+            self.thumb_label.config(text="🎬  Preview")
+            return
+        if not HAVE_PIL:
+            return
+        seq = self._thumb_seq
+        self.thumb_title.config(text="")
+        self.thumb_label.config(image="", text="Loading preview…")
+        threading.Thread(target=self._fetch_thumbnail, args=(url, seq),
+                         daemon=True).start()
+
+    def _fetch_thumbnail(self, url, seq):
+        """Pull title + thumbnail via yt-dlp (no download), off the UI thread."""
+        try:
+            opts = {"quiet": True, "no_warnings": True, "skip_download": True,
+                    "noplaylist": True, "logger": YtdlpLogger(lambda *a, **k: None)}
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False) or {}
+            if info.get("entries"):             # playlist -> use first entry
+                entries = [e for e in info["entries"] if e]
+                info = entries[0] if entries else {}
+            title = info.get("title") or ""
+            thumb_url = info.get("thumbnail")
+            if not thumb_url:
+                thumbs = info.get("thumbnails") or []
+                thumb_url = thumbs[-1]["url"] if thumbs else None
+            im = None
+            if thumb_url:
+                req = urllib.request.Request(
+                    thumb_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = resp.read()
+                im = self._fit(Image.open(io.BytesIO(data)).convert("RGB"), 256, 144)
+            self.msg_queue.put(("thumb", seq, im, title))
+        except Exception:
+            self.msg_queue.put(("thumb", seq, None, None))
+
+    @staticmethod
+    def _fit(im, w, h):
+        iw, ih = im.size
+        scale = min(w / iw, h / ih)
+        return im.resize((max(1, int(iw * scale)), max(1, int(ih * scale))),
+                         Image.LANCZOS)
+
+    def _show_thumb(self, im, title):
+        if im is None:
+            self._thumb_img = None
+            self.thumb_label.config(image="", text="No preview")
+            self.thumb_title.config(text=title or "")
+            return
+        self._thumb_img = ImageTk.PhotoImage(im)
+        self.thumb_label.config(image=self._thumb_img, text="")
+        self.thumb_title.config(text=title or "")
+
     # ---------------- Download worker ----------------
     def _build_opts(self, c):
         outtmpl = os.path.join(c["folder"], c["tmpl"] + ".%(ext)s")
@@ -564,6 +656,10 @@ class App:
                     self.status_var.set(item[2])
                 elif kind == "status":
                     self.status_var.set(item[1])
+                elif kind == "thumb":
+                    _, seq, im, title = item
+                    if seq == self._thumb_seq:   # ignore stale loads
+                        self._show_thumb(im, title)
                 elif kind == "done":
                     _, success, msg = item
                     self.status_var.set(msg)
@@ -572,9 +668,55 @@ class App:
                         self.progress["value"] = 100
                     self.download_btn.config(state="normal")
                     self.cancel_btn.config(state="disabled")
+                    if success:
+                        self._notify_done()
+                        self._reset_input()
         except queue.Empty:
             pass
         self.root.after(80, self._drain_queue)
+
+    def _reset_input(self):
+        """Clear the link box and preview after a successful download."""
+        if self._thumb_after:
+            self.root.after_cancel(self._thumb_after)
+            self._thumb_after = None
+        self._thumb_seq += 1                     # drop any in-flight preview
+        self.url_var.set("")                     # also resets preview via trace
+        self._show_thumb(None, "")
+        self.thumb_label.config(text="🎬  Preview")
+
+    # ---------------- Done notification ----------------
+    def _notify_done(self):
+        """On a successful finish: a tiny window shake + a short beep."""
+        self._shake_window()
+        self._play_done_sound()
+
+    def _shake_window(self):
+        """Nudge the window left/right a few times so the user notices."""
+        try:
+            r = self.root
+            r.update_idletasks()
+            x, y = r.winfo_x(), r.winfo_y()
+            offsets = [10, -8, 7, -5, 4, -3, 2, 0]
+            for i, dx in enumerate(offsets):
+                r.after(i * 35, lambda ox=x + dx: r.geometry(f"+{ox}+{y}"))
+            r.after(len(offsets) * 35, lambda: r.geometry(f"+{x}+{y}"))
+        except Exception:
+            pass
+
+    def _play_done_sound(self):
+        """Short notification sound; falls back to the window bell."""
+        if sys.platform == "win32":
+            try:
+                import winsound
+                winsound.MessageBeep(winsound.MB_OK)
+                return
+            except Exception:
+                pass
+        try:
+            self.root.bell()
+        except Exception:
+            pass
 
     def _append_log(self, text, color=None):
         tag = {OK: ("ok",), ERR: ("err",), MUTED: ("muted",)}.get(color, ())
