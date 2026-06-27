@@ -430,6 +430,20 @@ class App:
         self.status_var = tk.StringVar(value=self.t("ready"))
         ttk.Label(r, textvariable=self.status_var, style="Muted.TLabel").pack(anchor="w", **pad)
 
+        # Footer: developed by devbgr (clickable link).
+        # Packed to the bottom BEFORE the log so it always reserves its space.
+        footer = ttk.Frame(r)
+        footer.pack(side="bottom", fill="x", pady=(0, 10), **pad)
+        inner = ttk.Frame(footer)
+        inner.pack(anchor="center")
+        ttk.Label(inner, text="developed by ", style="Muted.TLabel").pack(side="left")
+        link = tk.Label(inner, text="devbgr", bg=BG, fg=ACCENT, cursor="hand2",
+                        font=("Segoe UI", 9, "underline"))
+        link.pack(side="left")
+        link.bind("<Button-1>", lambda _e: webbrowser.open(AUTHOR_URL))
+        link.bind("<Enter>", lambda _e: link.config(fg=ACCENT_HOVER))
+        link.bind("<Leave>", lambda _e: link.config(fg=ACCENT))
+
         # Log
         lf = tk.Frame(r, bg=BG2)
         lf.pack(fill="both", expand=True, pady=(8, 6), **pad)
@@ -442,19 +456,6 @@ class App:
         self.log_box.tag_config("ok", foreground=OK)
         self.log_box.tag_config("err", foreground=ERR)
         self.log_box.tag_config("muted", foreground=MUTED)
-
-        # Footer: developed by devbgr (clickable link)
-        footer = ttk.Frame(r)
-        footer.pack(fill="x", pady=(0, 10), **pad)
-        inner = ttk.Frame(footer)
-        inner.pack(anchor="center")
-        ttk.Label(inner, text="developed by ", style="Muted.TLabel").pack(side="left")
-        link = tk.Label(inner, text="devbgr", bg=BG, fg=ACCENT, cursor="hand2",
-                        font=("Segoe UI", 9, "underline"))
-        link.pack(side="left")
-        link.bind("<Button-1>", lambda _e: webbrowser.open(AUTHOR_URL))
-        link.bind("<Enter>", lambda _e: link.config(fg=ACCENT_HOVER))
-        link.bind("<Leave>", lambda _e: link.config(fg=ACCENT))
 
         self._on_mode_change(save=False)
 
