@@ -722,9 +722,9 @@ class App:
         tag = {OK: ("ok",), ERR: ("err",), MUTED: ("muted",)}.get(color, ())
         ts = time.strftime("%H:%M:%S")
         self.log_box.config(state="normal")
-        self.log_box.insert("end", f"[{ts}] ", ("muted",))
-        self.log_box.insert("end", text + "\n", tag)
-        self.log_box.see("end")
+        self.log_box.insert("1.0", text + "\n", tag)
+        self.log_box.insert("1.0", f"[{ts}] ", ("muted",))
+        self.log_box.see("1.0")
         self.log_box.config(state="disabled")
 
 
